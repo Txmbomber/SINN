@@ -1,0 +1,132 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from kerastuner import HyperModel, RandomSearch
+import matplotlib.pyplot as plt
+
+# Define a class for the hypermodel that inherits from the HyperModel class
+class AutoMLHyperModel(HyperModel):
+    def __init__(self, input_shape, output_shape):
+        self.input_shape = input_shape
+        self.output_shape = output_shape
+
+    # Build the model with hyperparameters specified in the 'hp' object
+    def build(self, hp):
+        model = keras.Sequential()
+
+        # Add input layer with the specified shape
+        model.add(layers.Input(shape=self.input_shape))
+
+        # Add dense, batch normalization, dropout, and regularization layers
+        for i in range(hp.Int('num_layers', 2, 20)):
+            # Add dense layer with random number of units between 32 and 512
+            model.add(layers.Dense(units=hp.Choice(f'units_{i}', [32, 64, 128, 256, 512]), activation='relu'))
+
+            # Add batch normalization layer after dense layer
+            model.add(layers.BatchNormalization())
+
+            # Add dropout layer with random dropout rate between 0 and 0.5
+            model.add(layers.Dropout(rate=hp.Float(f'dropout_{i}', 0, 0.5, 0.1)))
+
+            # Add regularizers to the layers
+            model.add(layers.ActivityRegularization(l1=hp.Float(f'l1_{i}', 0, 0.1, 0.01)))
+            model.add(layers.ActivityRegularization(l2=hp.Float(f'l2_{i}', 0, 0.1, 0.01)))
+
+        # Add output layer with specified output shape and activation function
+        model.add(layers.Dense(self.output_shape, activation='softmax'))
+
+        # Use Adam optimizer with variable learning rate
+        model.compile(optimizer=keras.optimizers.Adam(hp.Choice('learning_rate', [1e-2, 1e-3, 1e-4])),
+                      loss=keras.losses.CategoricalCrossentropy(),
+                      metrics=[keras.metrics.CategoricalAccuracy()])
+        return model
+
+# Add early stopping callback to avoid overfitting
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss', # monitor the validation loss for early stopping
+    mode='min', # minimize the validation loss
+    patience=5, # number of epochs with no improvement after which training will be stopped
+    restore_best_weights=True # restore weights from best epoch
+)
+
+# Add checkpoint callback to save the best model weights
+checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+    filepath='best_model.h5', # file to save the weights
+    monitor='val_categorical_accuracy', # monitor the validation accuracy for saving
+    mode='max', # maximize the validation accuracy
+    save_best_only=True # save only the best weights
+)
+
+# Load MNIST dataset
+(x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
+x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
+y_train = keras.utils.to_categorical(y_train, 10)
+y_test = keras.utils.to_categorical(y_test, 10)
+
+# Define hypermodel
+hypermodel = AutoMLHyperModel(input_shape=(28, 28, 1), output_shape=10)
+
+# Use RandomSearch to find best hyperparameters
+tuner = RandomSearch(
+    hypermodel,
+    objective='val_categorical_accuracy',
+    max_trials=100,
+    directory='auto_ml',
+    project_name='example'
+)
+
+# Define callback to visualize search progress
+class ProgressCallback(tf.keras.callbacks.Callback):
+    def __init__(self, tuner):
+        self.tuner = tuner
+        self.trial_metrics = {}
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Get the ID of the current trial
+        trial_id = self.tuner.oracle.get_trial_id()
+        # If trial ID does not exist in the dictionary of trial metrics, add it
+        if trial_id not in self.trial_metrics:
+            self.trial_metrics[trial_id] = {
+                'objectives': [],
+                'epochs': []
+            }
+        # Append the current trial's objective value and epoch to its dictionary
+        if logs and 'val_categorical_accuracy' in logs:
+            self.trial_metrics[trial_id]['objectives'].append(logs['val_categorical_accuracy'])
+            self.trial_metrics[trial_id]['epochs'].append(epoch)
+        # Plot the accuracy progress for each trial
+        plt.clf()
+        for trial_id, metrics in self.trial_metrics.items():
+            plt.plot(metrics['epochs'], metrics['objectives'], '-o', label=str(trial_id))
+        plt.legend()
+        plt.xlabel('epoch')
+        plt.ylabel('accuracy')
+        plt.title('AutoML Hyperparameter Tuning')
+        plt.savefig('auto_ml_progress.png')
+
+# Train the model with early stopping and progress callback
+tuner.search(
+    x_train,
+    y_train,
+    epochs=50,
+    validation_data=(x_test, y_test),
+    callbacks=[early_stopping, ProgressCallback(tuner)]
+)
+
+# Get best hyperparameters and retrain model
+best_model = tuner.get_best_models(num_models=1)[0]
+best_hyperparameters = tuner.get_best_hyperparameters(1)[0]
+best_model.compile(
+    optimizer=keras.optimizers.Adam(best_hyperparameters.get('learning_rate')),
+    loss=keras.losses.CategoricalCrossentropy(),
+    metrics=[keras.metrics.CategoricalAccuracy()]
+)
+best_model.fit(
+    x_train,
+    y_train,
+    epochs=100,
+    batch_size=128,
+    validation_data=(x_test, y_test),
+    callbacks=[early_stopping]
+)
