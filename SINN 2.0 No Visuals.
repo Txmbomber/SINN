@@ -1,0 +1,76 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from kerastuner import HyperModel, RandomSearch
+
+# Define early stopping callback
+# This callback stops the training process early if the validation loss stops improving after a certain number of epochs
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    mode='min',
+    patience=5,
+    restore_best_weights=True
+)
+
+# Define a custom hypermodel for AutoML
+class AutoMLHyperModel(HyperModel):
+    def __init__(self, input_shape, output_shape):
+        self.input_shape = input_shape
+        self.output_shape = output_shape
+
+    # Build the model based on hyperparameters
+    def build(self, hp):
+        model = keras.Sequential()
+        model.add(layers.Input(shape=self.input_shape))
+
+        # Add layers based on hyperparameters
+        for i in range(hp.Int('num_layers', 2, 20)):
+            model.add(layers.Dense(units=hp.Int(f'units_{i}', 32, 512, 32), activation='relu'))
+            model.add(layers.Dropout(rate=hp.Float(f'dropout_{i}', 0, 0.5, 0.1)))
+            model.add(layers.BatchNormalization())
+
+        # Add final output layer
+        model.add(layers.Dense(self.output_shape, activation='softmax'))
+
+        # Compile model with hyperparameters
+        model.compile(optimizer=keras.optimizers.Adam(hp.Choice('learning_rate', [1e-2, 1e-3, 1e-4])),
+                      loss=keras.losses.CategoricalCrossentropy(),
+                      metrics=[keras.metrics.CategoricalAccuracy()])
+        return model
+
+# Load and preprocess the MNIST dataset
+def load_data():
+    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+    x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
+    x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
+    y_train = keras.utils.to_categorical(y_train, 10)
+    y_test = keras.utils.to_categorical(y_test, 10)
+    return x_train, y_train, x_test, y_test
+
+# Train the model with the given hyperparameters and data
+def train_model(model, x_train, y_train, x_test, y_test, batch_size, epochs):
+    model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, validation_data=(x_test, y_test), callbacks=[early_stopping])
+
+# Tune the hyperparameters using RandomSearch and return the best model
+def tune_hyperparameters(x_train, y_train, x_test, y_test, max_trials, executions_per_trial, directory, project_name, seed):
+    # Define hypermodel
+    hypermodel = AutoMLHyperModel(input_shape=(28, 28, 1), output_shape=10)
+
+    # Use RandomSearch to find best hyperparameters
+    tuner = RandomSearch(
+        hypermodel,
+        objective='val_categorical_accuracy',
+        max_trials=max_trials,
+        directory=directory,
+        project_name=project_name,
+        executions_per_trial=executions_per_trial,
+        seed=seed,
+        overwrite=True
+    )
+
+    # Search for best hyperparameters
+    tuner.search(x_train, y_train, epochs=10, validation_data=(x_test, y_test), callbacks=[early_stopping])
+
+    # Retrieve the best model and return it
+    best_model = tuner.get_best_models(num_models=1)[0]
+    return best_model
